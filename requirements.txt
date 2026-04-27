@@ -1,0 +1,15 @@
+google-api-python-client>=2.147.0
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+python-telegram-bot>=21.6
+motor>=3.6.0
+pymongo>=4.9.0
+APScheduler>=3.10.4
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+ollama>=0.4.0
+openai>=1.55.0
+structlog>=24.4.0
+python-dotenv>=1.0.1
+httpx>=0.28.0
+python-dateutil>=2.9.0
