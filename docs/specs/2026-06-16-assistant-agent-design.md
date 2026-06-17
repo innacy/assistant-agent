@@ -68,6 +68,7 @@ assistant-agent/
 │   ├── db/
 │   │   ├── mongo.go                # Connection, indexes, lifecycle
 │   │   ├── alerts.go               # Alert CRUD + queries (upcoming, missed, by type)
+│   │   ├── history.go              # Alert history archival + queries
 │   │   └── sync_state.go           # Per-source sync bookmarks
 │   ├── auth/
 │   │   └── google.go               # OAuth2 flow (shared across all sources)
@@ -90,9 +91,10 @@ assistant-agent/
 │   │   └── daemon.go               # Background sync scheduler
 │   └── api/
 │       ├── server.go               # Router + static file serving
-│       ├── handlers_alerts.go      # Alert endpoints
+│       ├── handlers_alerts.go      # Alert CRUD + actions
+│       ├── handlers_history.go     # History queries
 │       ├── handlers_sync.go        # Sync trigger/status
-│       └── middleware.go           # CORS, logging, error handling
+│       └── middleware.go           # Bearer token auth, CORS, logging
 │
 ├── web/                            # Embedded UI (Vite + React + TS)
 │   ├── package.json
@@ -143,10 +145,10 @@ assistant-agent/
 | `next_occurrence` | time | Computed next date for recurring items |
 | `amount` | float64 | Payment amount if applicable (nullable) |
 | `currency` | string | Default "INR" |
-| `source` | string | `gmail`, `calendar`, `tasks`, `contacts` |
-| `source_ref` | string | Gmail message ID / Calendar event ID / Task ID / Contact ID |
+| `source` | string | `gmail`, `calendar`, `tasks`, `contacts`, `manual` |
+| `source_ref` | string | Gmail message ID / Calendar event ID / Task ID / Contact ID. For recurring instances, includes occurrence date suffix (e.g., `event_abc:2026-07-15`). For manual: `manual:<uuid>` |
 | `source_raw` | string | Original subject line or event title |
-| `status` | string | `upcoming`, `due_today`, `missed`, `acknowledged` |
+| `status` | string | `upcoming`, `due_today`, `missed`, `snoozed`, `acknowledged` |
 | `priority` | string | `low`, `medium`, `high` |
 | `window_before` | int | Days before `due_date` to surface this alert |
 | `expires_at` | time | TTL — MongoDB auto-deletes after this |
@@ -190,6 +192,23 @@ assistant-agent/
 | `timezone` | string | "Asia/Kolkata" |
 | `initial_lookback` | string | How far back on first sync ("3m") |
 
+### Collection: `alert_history`
+
+Same schema as `alerts`, plus:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `archived_at` | time | When the alert was moved to history |
+| `outcome` | string | `acknowledged`, `expired_unacknowledged` |
+
+Alerts are moved here:
+- When acknowledged and past due_date + TTL window (completed lifecycle)
+- When TTL would delete an unacknowledged alert (missed and expired)
+
+No TTL index on this collection — history is kept permanently. Enables queries like "what did I pay last month?" and "whose birthdays did I miss?"
+
+**Index**: `(user_id, type, due_date)`, `(user_id, archived_at)`
+
 ### Alert Lifecycle
 
 ```
@@ -199,12 +218,24 @@ assistant-agent/
 
 [User action]  → status: "acknowledged" (user marked as seen/done)
 
-[Snooze]       → snoozed_until set, re-surfaces on that date
+[Snooze]       → status: "snoozed" (excluded from all views until snoozed_until date)
+              → on snoozed_until date: status reverts to "upcoming" or "due_today"
 
-[TTL expires]  → document auto-deleted by MongoDB (no intermediate state)
+[TTL expires]  → document moved to alert_history collection, then deleted from alerts
 
-[Recurring]    → after acknowledged, compute next_occurrence, create new alert
+[Recurring]    → daily job creates new alert for next occurrence within lookahead window
 ```
+
+**Status transitions**:
+- `upcoming` → `due_today` (date arrives)
+- `upcoming` → `missed` (date passes without acknowledgment)
+- `due_today` → `missed` (day ends without acknowledgment)
+- `upcoming`/`due_today`/`missed` → `snoozed` (user snoozes)
+- `snoozed` → `upcoming`/`due_today` (snooze expires)
+- any → `acknowledged` (user marks done)
+- `acknowledged` → moved to `alert_history` → TTL deletes from `alerts`
+
+**Note on status computation**: The API computes status dynamically at query time based on `due_date` vs current time. The stored `status` field is updated by the daemon but the API never trusts it blindly — it recalculates before returning results. This prevents stale data between daemon ticks.
 
 **TTL computation per type**:
 
@@ -247,32 +278,48 @@ type RawItem struct {
 
 **Extracts**: Subscription renewals, payment due reminders, booking confirmations with dates.
 
-**Template matching (rules-only)**:
-- Subject line patterns: "your subscription", "payment due", "renewal", "upcoming charge", "bill generated", "reminder"
-- Sender whitelist: configurable known billers
-- Body extraction: regex for amounts (₹/INR/Rs patterns), dates, service names
+**Two-tier parsing logic**:
+1. **Whitelisted senders** (configured in `gmail.sender_whitelist`): all emails from these senders are processed unconditionally. High confidence — these are known billers.
+2. **Unknown senders**: must match BOTH a subject pattern AND pass body validation (contains an amount pattern like ₹/INR/Rs, or a date reference, or a service name). This prevents marketing spam from triggering false alerts.
+
+**Subject patterns**: "your subscription", "payment due", "renewal", "upcoming charge", "bill generated", "reminder", "invoice", "due date"
+
+**Body validation for unknown senders**:
+- Must contain at least ONE of: amount regex (`₹\d+`, `INR \d+`, `Rs\.?\s?\d+`), a future date reference, or a renewal/expiry keyword in context
+- Extracts: service name (From header or body), amount, due date
+
+**Duplicate email handling**: Multiple emails about the same subscription event (e.g., "renewing in 3 days" + "payment processed") are merged by normalizing the title and checking for existing alerts with the same `(type, normalized_title, due_date within ±3 days)`. The later email updates the existing alert rather than creating a new one.
 
 **Sync strategy**:
 - First run: backfill using `after:<date>` query filter
 - Incremental: Gmail `historyId` to fetch only new messages
-- Query: `(subject:subscription OR subject:renewal OR subject:payment OR subject:due OR subject:bill OR subject:reminder)`
+- **HistoryId expiry fallback**: If historyId returns HTTP 404 (expired after ~30 days of inactivity), fall back to date-based query `after:<last_sync_at>` and reset historyId from the response.
+- Query: `(subject:subscription OR subject:renewal OR subject:payment OR subject:due OR subject:bill OR subject:reminder OR from:<whitelisted_senders>)`
 
 ### Calendar Syncer
 
 **Scope**: `calendar.readonly`
 
-**Extracts**: All events from primary calendar + "Birthdays" calendar.
+**Extracts**: Filtered events from primary calendar + "Birthdays" calendar.
+
+**Event filtering** (to avoid noise from meetings/standups):
+- All-day events: always included
+- Timed events: only if title matches keywords ("pay", "due", "bill", "EMI", "renew", "deadline", "expires", "appointment")
+- "Birthdays" calendar: always included (all events)
+- Regular meetings, standups, 1:1s, video calls: excluded
 
 **Mapping to alert types**:
 - "Birthdays" calendar events → type: `birthday`
-- Events with keywords ("pay", "due", "bill", "EMI", "renew") → type: `payment`
+- Events with payment keywords ("pay", "due", "bill", "EMI", "renew") → type: `payment`
 - Recurring events matching subscription patterns → type: `subscription`
-- Other events → type: `event`
+- Other qualifying events (all-day or keyword-matched) → type: `event`
 
 **Sync strategy**:
 - First run: fetch events from (today - lookback) to (today + 90 days)
 - Incremental: Calendar `syncToken` for delta updates
 - Recurring events expanded into individual occurrences within the window
+- **Deletion handling**: Calendar syncToken responses include `cancelled` events. When detected, delete or mark the corresponding alert as acknowledged.
+- Source ref for recurring instances: `<event_id>:<occurrence_date>` to ensure uniqueness
 
 ### Tasks Syncer
 
@@ -286,6 +333,7 @@ type RawItem struct {
 - Fetch all task lists, then tasks per list
 - Filter: `showCompleted=false`, `dueMin=<lookback>`, `dueMax=<future_window>`
 - Full fetch each cycle (Tasks API has no sync token; dataset is small)
+- **External completion handling**: After fetching active tasks, compare fetched task IDs against existing `source: "tasks"` alerts. Any alert whose `source_ref` is NOT in the fetched set (and isn't already acknowledged) → mark as `acknowledged` (user completed it in Google Tasks directly).
 
 ### Contacts Syncer
 
@@ -293,11 +341,14 @@ type RawItem struct {
 
 **Extracts**: All contacts with a birthday field. Produces yearly recurring birthday alerts.
 
+**Birthdays without year**: Many contacts store only month/day (no year). These are still valid — the alert is created with `metadata.birth_year: null`. The UI displays "Birthday" without age. If year is present, UI can optionally show age.
+
 **Sync strategy**:
 - Full fetch each cycle (contacts change rarely)
 - Compute next upcoming birthday from month/day relative to today
 - Compare against existing alerts by `source_ref` (contact resource name)
 - Deduplicated against Calendar birthdays using normalized name matching
+- Source ref: `<contact_resource_name>:<year>` (e.g., `people/c123:2026`) to allow yearly instances
 
 ### Cross-Source Deduplication
 
@@ -325,12 +376,42 @@ type RawItem struct {
 2. Status refresh pass:
    - alerts where due_date < now AND status = "upcoming" → set "missed"
    - alerts where due_date == today AND status = "upcoming" → set "due_today"
-   - snoozed alerts where snoozed_until <= today → clear snooze, re-surface
+   - snoozed alerts where snoozed_until <= today → revert to "upcoming" or "due_today"
 
-3. Recurring alert rotation:
-   - Acknowledged recurring alerts → compute next_occurrence
-   - Create new alert for next cycle if within lookahead window
+3. History archival pass:
+   - Acknowledged alerts past TTL window → move to alert_history, delete from alerts
+   - Unacknowledged alerts past TTL window → move to alert_history with outcome "expired_unacknowledged", delete from alerts
 ```
+
+### Daily Recurring Job (midnight)
+
+Runs once per day (separate from the poll-interval tick):
+
+```
+1. Scan all known recurring patterns:
+   - Alerts with recurrence != "none" that have been acknowledged
+   - Contacts birthdays (yearly)
+   - Calendar recurring events within the next 90 days
+
+2. For each recurring pattern, compute next occurrence date
+
+3. If next_occurrence falls within the alert's window_before:
+   - Check if an alert already exists for that occurrence (by source_ref with date suffix)
+   - If not, create a new "upcoming" alert
+
+4. This ensures recurring alerts surface exactly window_before days in advance,
+   regardless of when the previous occurrence was acknowledged.
+```
+
+### Graceful Shutdown
+
+On SIGTERM/SIGINT:
+1. Stop accepting new sync ticks
+2. Wait for in-progress sync goroutines to finish (timeout: 30 seconds)
+3. If timeout reached, cancel context (goroutines abort)
+4. Run one final history archival pass
+5. Close MongoDB connection
+6. Exit
 
 ### First-Run / Auth Flow
 
@@ -356,12 +437,17 @@ type RawItem struct {
 
 Served by Go binary (Gin router). Serves both JSON endpoints and embedded static UI files.
 
+### Authentication
+
+Simple bearer token authentication. Token is configured in `config.yaml` under `server.api_token`. All `/api/*` endpoints require `Authorization: Bearer <token>` header. The health endpoint is unauthenticated.
+
 ### Endpoints
 
 ```
+# Alerts — read
 GET  /api/alerts                    — all active alerts (filterable)
      ?type=birthday,subscription
-     ?status=upcoming,missed
+     ?status=upcoming,missed,snoozed
      ?from=2026-06-16&to=2026-06-30
      ?limit=50&offset=0
 
@@ -371,19 +457,73 @@ GET  /api/alerts/today              — due today
 
 GET  /api/alerts/:id                — single alert detail
 
+# Alerts — write
+POST   /api/alerts                  — create manual alert (user-defined reminder)
+PUT    /api/alerts/:id              — edit alert (title, due_date, tags, etc.)
+DELETE /api/alerts/:id              — delete alert
+
+# Alerts — actions
 PATCH /api/alerts/:id/acknowledge   — mark as seen/done
 PATCH /api/alerts/:id/snooze        — snooze until date
       ?until=2026-06-20
 
+# Alerts — batch operations
+POST /api/alerts/batch/acknowledge  — acknowledge multiple alerts
+     body: { "ids": ["id1", "id2"] } OR { "filter": { "status": "missed", "type": "task" } }
+POST /api/alerts/batch/snooze       — snooze multiple alerts
+     body: { "ids": [...], "until": "2026-06-20" } OR { "filter": {...}, "until": "..." }
+
+# History
+GET  /api/history                   — archived alerts (same filters as /api/alerts)
+     ?type=subscription&from=2026-05-01&to=2026-06-01&limit=50&offset=0
+
+# Sync
 GET  /api/sync/status               — per-source sync state
 POST /api/sync/trigger              — trigger immediate sync
      ?source=gmail                  — optional: specific source only
 
+# Settings
 GET  /api/settings                  — user settings
 PUT  /api/settings                  — update settings (windows, poll interval)
 
+# Health (unauthenticated)
 GET  /health                        — health check
 ```
+
+### Response Envelope
+
+All list endpoints return:
+
+```json
+{
+  "data": [...],
+  "total": 142,
+  "limit": 50,
+  "offset": 0,
+  "has_more": true
+}
+```
+
+Single item endpoints return the object directly. Action endpoints return `{ "ok": true }`.
+
+### Manual Alert Creation (POST /api/alerts)
+
+Request body:
+
+```json
+{
+  "type": "payment",
+  "title": "Renew passport",
+  "description": "Expires December 2026",
+  "due_date": "2026-12-01",
+  "recurrence": "none",
+  "amount": null,
+  "priority": "high",
+  "tags": ["documents"]
+}
+```
+
+Manual alerts have `source: "manual"` and `source_ref: "manual:<generated_uuid>"`. They support full CRUD — edit title, change due_date, delete entirely.
 
 ### Static UI Serving
 
@@ -441,6 +581,7 @@ alerts:
 server:
   port: 8080
   mode: "release"
+  api_token: "your-secret-token-here"  # Required for API access
 
 gmail:
   query_filters:
@@ -483,6 +624,18 @@ log_level: "info"
 
 ## Docker Deployment
 
+### OAuth Setup (before Docker)
+
+Run auth locally first (requires browser):
+
+```bash
+# On your machine (not Docker)
+assistant-agent --auth
+# Browser opens → grant access → token.json saved locally
+```
+
+Then mount the token into Docker:
+
 ```yaml
 services:
   assistant-agent:
@@ -493,7 +646,7 @@ services:
       - "8080:8080"
     volumes:
       - ./credentials.json:/app/credentials.json
-      - ./token.json:/app/token.json
+      - ./token.json:/app/token.json        # Pre-authenticated
     depends_on:
       - mongodb
     restart: unless-stopped
@@ -508,6 +661,8 @@ services:
 volumes:
   mongo-data:
 ```
+
+If the token expires while running in Docker, the agent logs a warning and pauses syncing. Re-run `assistant-agent --auth` locally and restart the container with the fresh token.
 
 ---
 
