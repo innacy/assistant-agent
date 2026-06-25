@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -11,6 +14,7 @@ import (
 	"github.com/innacy/assistant-agent/pkg/api"
 	auth_pkg "github.com/innacy/assistant-agent/pkg/auth"
 	"github.com/innacy/assistant-agent/pkg/config"
+	daemonpkg "github.com/innacy/assistant-agent/pkg/daemon"
 	"github.com/innacy/assistant-agent/pkg/db"
 )
 
@@ -38,9 +42,37 @@ func main() {
 		}
 		log.Info().Msg("Authentication successful! Token saved.")
 	case *syncOnce:
-		fmt.Println("TODO: single sync")
+		database, err := db.Connect(cfg.DB)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to connect to MongoDB")
+		}
+		defer database.Close()
+
+		d, err := daemonpkg.New(database, cfg)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to create daemon")
+		}
+		if err := d.RunOnce(context.Background()); err != nil {
+			log.Fatal().Err(err).Msg("sync failed")
+		}
 	case *daemon:
-		fmt.Println("TODO: daemon mode")
+		database, err := db.Connect(cfg.DB)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to connect to MongoDB")
+		}
+		defer database.Close()
+
+		d, err := daemonpkg.New(database, cfg)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to create daemon")
+		}
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		if err := d.Run(ctx); err != nil && err != context.Canceled {
+			log.Fatal().Err(err).Msg("daemon failed")
+		}
 	case *serve:
 		database, err := db.Connect(cfg.DB)
 		if err != nil {
