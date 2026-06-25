@@ -1,0 +1,11 @@
+bin/
+assistant-agent
+config.yaml
+credentials.json
+token.json
+web/dist/
+web/node_modules/
+.idea/
+.vscode/
+.DS_Store
+vendor/

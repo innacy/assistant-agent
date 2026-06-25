@@ -1,0 +1,49 @@
+db:
+  uri: "mongodb://localhost:27017"
+  database: "assistant-agent"
+  timeout: 10s
+
+google:
+  credentials_file: "./credentials.json"
+  token_file: "./token.json"
+
+daemon:
+  poll_interval: 15m
+  initial_lookback: "3m"
+
+alerts:
+  windows:
+    birthday: 7
+    subscription: 3
+    payment: 5
+    task: 1
+    event: 2
+  ttl:
+    birthday: 2
+    subscription: 7
+    payment: 7
+    task: 14
+    event: 1
+
+server:
+  port: 8080
+  mode: "release"
+  api_token: "change-me-to-a-real-token"
+
+gmail:
+  query_filters:
+    - "subject:subscription"
+    - "subject:renewal"
+    - "subject:payment due"
+    - "subject:bill generated"
+    - "subject:upcoming charge"
+    - "subject:reminder"
+  sender_whitelist:
+    - "noreply@netflix.com"
+    - "no-reply@spotify.com"
+    - "alerts@hdfcbank.net"
+    - "noreply@airtel.in"
+    - "billing@aws.amazon.com"
+
+timezone: "Asia/Kolkata"
+log_level: "info"
