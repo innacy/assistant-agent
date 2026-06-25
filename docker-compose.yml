@@ -1,0 +1,23 @@
+services:
+  assistant-agent:
+    build: .
+    command: ["./assistant-agent", "--serve"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./credentials.json:/app/credentials.json
+      - ./token.json:/app/token.json
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:
