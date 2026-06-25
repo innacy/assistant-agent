@@ -25,7 +25,7 @@ func (s *Server) handleListAlerts(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	result.Data = engine.RecomputeStatuses(result.Data)
+	result.Data = engine.RecomputeStatuses(result.Data, s.cfg.Location())
 	c.JSON(http.StatusOK, result)
 }
 
@@ -41,7 +41,7 @@ func (s *Server) handleGetAlert(c *gin.Context) {
 		respondError(c, http.StatusNotFound, "alert not found")
 		return
 	}
-	alert.Status = engine.ComputeStatus(alert, time.Now())
+	alert.Status = engine.ComputeStatus(alert, time.Now(), s.cfg.Location())
 	c.JSON(http.StatusOK, alert)
 }
 
@@ -56,7 +56,7 @@ func (s *Server) handleUpcomingAlerts(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	result.Data = engine.RecomputeStatuses(result.Data)
+	result.Data = engine.RecomputeStatuses(result.Data, s.cfg.Location())
 	c.JSON(http.StatusOK, result)
 }
 
@@ -71,7 +71,7 @@ func (s *Server) handleMissedAlerts(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	result.Data = engine.RecomputeStatuses(result.Data)
+	result.Data = engine.RecomputeStatuses(result.Data, s.cfg.Location())
 	c.JSON(http.StatusOK, result)
 }
 
@@ -86,7 +86,7 @@ func (s *Server) handleTodayAlerts(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	result.Data = engine.RecomputeStatuses(result.Data)
+	result.Data = engine.RecomputeStatuses(result.Data, s.cfg.Location())
 	c.JSON(http.StatusOK, result)
 }
 
@@ -148,7 +148,7 @@ func (s *Server) handleCreateAlert(c *gin.Context) {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	alert.Status = engine.ComputeStatus(&alert, now)
+	alert.Status = engine.ComputeStatus(&alert, now, s.cfg.Location())
 	if recurrence != models.RecurrenceNone {
 		alert.NextOccurrence = engine.NextOccurrence(dueDate, recurrence)
 	}
@@ -201,7 +201,7 @@ func (s *Server) handleUpdateAlert(c *gin.Context) {
 		alert.Tags = tags
 	}
 	alert.UpdatedAt = time.Now()
-	alert.Status = engine.ComputeStatus(alert, time.Now())
+	alert.Status = engine.ComputeStatus(alert, time.Now(), s.cfg.Location())
 
 	if err := s.db.UpsertAlert(c.Request.Context(), alert); err != nil {
 		respondError(c, http.StatusInternalServerError, err.Error())

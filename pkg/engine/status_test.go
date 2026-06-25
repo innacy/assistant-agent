@@ -57,7 +57,7 @@ func TestComputeStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ComputeStatus(&tt.alert, now)
+			got := ComputeStatus(&tt.alert, now, time.UTC)
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}

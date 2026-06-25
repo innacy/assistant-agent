@@ -72,6 +72,19 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
+func (c *Config) Location() *time.Location {
+	if c == nil || c.Timezone == "" {
+		loc, _ := time.LoadLocation("Asia/Kolkata")
+		return loc
+	}
+	loc, err := time.LoadLocation(c.Timezone)
+	if err != nil {
+		loc, _ = time.LoadLocation("UTC")
+		return loc
+	}
+	return loc
+}
+
 func setDefaults() {
 	viper.SetDefault("db.uri", "mongodb://localhost:27017")
 	viper.SetDefault("db.database", "assistant-agent")
