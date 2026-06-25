@@ -8,7 +8,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/innacy/assistant-agent/pkg/api"
 	"github.com/innacy/assistant-agent/pkg/config"
+	"github.com/innacy/assistant-agent/pkg/db"
 )
 
 func main() {
@@ -36,7 +38,17 @@ func main() {
 	case *daemon:
 		fmt.Println("TODO: daemon mode")
 	case *serve:
-		fmt.Println("TODO: serve mode")
+		database, err := db.Connect(cfg.DB)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to connect to MongoDB")
+		}
+		defer database.Close()
+
+		srv := api.NewServer(database, cfg)
+		log.Info().Int("port", cfg.Server.Port).Msg("starting server")
+		if err := srv.Run(); err != nil {
+			log.Fatal().Err(err).Msg("server failed")
+		}
 	default:
 		flag.Usage()
 	}
