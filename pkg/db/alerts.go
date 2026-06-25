@@ -30,19 +30,23 @@ type AlertListResult struct {
 }
 
 func (m *MongoDB) UpsertAlert(ctx context.Context, alert *models.Alert) error {
-	alert.UpdatedAt = time.Now()
+	now := time.Now()
+	alert.UpdatedAt = now
 	if alert.CreatedAt.IsZero() {
-		alert.CreatedAt = time.Now()
+		alert.CreatedAt = now
 	}
+	createdAt := alert.CreatedAt
+	alert.CreatedAt = time.Time{}
 
 	filter := bson.M{"source": alert.Source, "source_ref": alert.SourceRef}
 	update := bson.M{
 		"$set":         alert,
-		"$setOnInsert": bson.M{"created_at": alert.CreatedAt},
+		"$setOnInsert": bson.M{"created_at": createdAt},
 	}
 	opts := options.Update().SetUpsert(true)
 
 	_, err := m.Alerts().UpdateOne(ctx, filter, update, opts)
+	alert.CreatedAt = createdAt
 	return err
 }
 

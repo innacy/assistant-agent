@@ -58,7 +58,7 @@ type Alert struct {
 	SnoozedUntil   *time.Time             `bson:"snoozed_until,omitempty" json:"snoozed_until,omitempty"`
 	Tags           []string               `bson:"tags,omitempty" json:"tags,omitempty"`
 	Metadata       map[string]interface{} `bson:"metadata,omitempty" json:"metadata,omitempty"`
-	CreatedAt      time.Time              `bson:"created_at" json:"created_at"`
+	CreatedAt      time.Time              `bson:"created_at,omitempty" json:"created_at"`
 	UpdatedAt      time.Time              `bson:"updated_at" json:"updated_at"`
 }
 

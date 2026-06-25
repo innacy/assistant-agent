@@ -10,3 +10,4 @@ pkg/api/web_dist/
 .vscode/
 .DS_Store
 vendor/
+web/test-results/
