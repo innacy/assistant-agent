@@ -19,12 +19,14 @@ import (
 var webFS embed.FS
 
 type Server struct {
-	router *gin.Engine
-	db     *db.MongoDB
-	cfg    *config.Config
+	router    *gin.Engine
+	db        *db.MongoDB
+	cfg       *config.Config
+	triggerCh chan struct{}
+	isSyncing func() bool
 }
 
-func NewServer(database *db.MongoDB, cfg *config.Config) *Server {
+func NewServer(database *db.MongoDB, cfg *config.Config, triggerCh chan struct{}, isSyncing func() bool) *Server {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -35,9 +37,11 @@ func NewServer(database *db.MongoDB, cfg *config.Config) *Server {
 	router.Use(RequestLogger())
 
 	s := &Server{
-		router: router,
-		db:     database,
-		cfg:    cfg,
+		router:    router,
+		db:        database,
+		cfg:       cfg,
+		triggerCh: triggerCh,
+		isSyncing: isSyncing,
 	}
 
 	router.GET("/health", s.handleHealth)

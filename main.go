@@ -48,7 +48,7 @@ func main() {
 		}
 		defer database.Close()
 
-		d, err := daemonpkg.New(database, cfg)
+		d, err := daemonpkg.New(database, cfg, nil)
 		if err != nil {
 			log.Fatal().Err(err).Msg("failed to create daemon")
 		}
@@ -62,7 +62,7 @@ func main() {
 		}
 		defer database.Close()
 
-		d, err := daemonpkg.New(database, cfg)
+		d, err := daemonpkg.New(database, cfg, nil)
 		if err != nil {
 			log.Fatal().Err(err).Msg("failed to create daemon")
 		}
@@ -83,27 +83,26 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		var d *daemonpkg.Daemon
-		d, err = daemonpkg.New(database, cfg)
+		triggerCh := make(chan struct{}, 1)
+
+		d, err := daemonpkg.New(database, cfg, triggerCh)
 		if err != nil {
-			log.Warn().Err(err).Msg("daemon unavailable (run --auth first); starting API only")
-		} else {
-			go func() {
-				if err := d.Run(ctx); err != nil && err != context.Canceled {
-					log.Error().Err(err).Msg("daemon stopped with error")
-				}
-			}()
+			log.Fatal().Err(err).Msg("failed to create daemon")
 		}
 
-		srv := api.NewServer(database, cfg)
+		go func() {
+			if err := d.Run(ctx); err != nil && err != context.Canceled {
+				log.Error().Err(err).Msg("daemon stopped with error")
+			}
+		}()
+
+		srv := api.NewServer(database, cfg, triggerCh, d.IsSyncing)
 		log.Info().Int("port", cfg.Server.Port).Msg("starting server")
 		if err := srv.RunWithContext(ctx); err != nil {
 			log.Fatal().Err(err).Msg("server failed")
 		}
 
-		if d != nil {
-			d.Stop()
-		}
+		d.Stop()
 		log.Info().Msg("shutdown complete")
 	default:
 		flag.Usage()

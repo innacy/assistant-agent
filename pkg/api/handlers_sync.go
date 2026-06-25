@@ -21,5 +21,18 @@ func (s *Server) handleSyncStatus(c *gin.Context) {
 }
 
 func (s *Server) handleSyncTrigger(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "sync triggered"})
+	if s.triggerCh == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "message": "daemon not available"})
+		return
+	}
+	if s.isSyncing != nil && s.isSyncing() {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "sync already in progress"})
+		return
+	}
+	select {
+	case s.triggerCh <- struct{}{}:
+		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "sync triggered"})
+	default:
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "sync already in progress"})
+	}
 }
