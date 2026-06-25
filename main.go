@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/innacy/assistant-agent/pkg/api"
+	auth_pkg "github.com/innacy/assistant-agent/pkg/auth"
 	"github.com/innacy/assistant-agent/pkg/config"
 	"github.com/innacy/assistant-agent/pkg/db"
 )
@@ -32,7 +33,10 @@ func main() {
 
 	switch {
 	case *auth:
-		fmt.Println("TODO: OAuth flow")
+		if err := auth_pkg.RunAuthFlow(cfg.Google); err != nil {
+			log.Fatal().Err(err).Msg("auth flow failed")
+		}
+		log.Info().Msg("Authentication successful! Token saved.")
 	case *syncOnce:
 		fmt.Println("TODO: single sync")
 	case *daemon:
