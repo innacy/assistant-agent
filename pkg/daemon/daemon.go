@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -22,52 +24,79 @@ import (
 	taskspkg "github.com/innacy/assistant-agent/pkg/sources/tasks"
 )
 
-const defaultUserID = "default"
+const (
+	defaultUserID      = "default"
+	authRetryInterval  = 5 * time.Minute
+	syncRetryDelay     = 30 * time.Second
+)
 
 type Daemon struct {
 	db           *db.MongoDB
 	cfg          *config.Config
 	syncers      []sources.Syncer
 	stopCh       chan struct{}
+	triggerCh    <-chan struct{}
 	doneCh       chan struct{}
 	stopOnce     sync.Once
 	pollInterval time.Duration
 	userID       string
+	loc          *time.Location
+	syncing      atomic.Bool
+	authMu       sync.Mutex
 }
 
-func New(database *db.MongoDB, cfg *config.Config) (*Daemon, error) {
-	httpClient, err := auth.GetClient(cfg.Google)
-	if err != nil {
-		return nil, err
+func New(database *db.MongoDB, cfg *config.Config, triggerCh <-chan struct{}) (*Daemon, error) {
+	d := &Daemon{
+		db:           database,
+		cfg:          cfg,
+		syncers:      nil,
+		stopCh:       make(chan struct{}),
+		triggerCh:    triggerCh,
+		doneCh:       make(chan struct{}),
+		pollInterval: cfg.Daemon.PollInterval,
+		userID:       defaultUserID,
+		loc:          cfg.Location(),
+	}
+	if d.pollInterval <= 0 {
+		d.pollInterval = 15 * time.Minute
 	}
 
-	syncers := []sources.Syncer{
+	if err := d.initSyncers(); err != nil {
+		log.Warn().Err(err).Msg("auth unavailable at startup; will retry every 5 minutes")
+	}
+
+	return d, nil
+}
+
+func (d *Daemon) IsSyncing() bool {
+	return d.syncing.Load()
+}
+
+func (d *Daemon) initSyncers() error {
+	httpClient, err := auth.GetClient(d.cfg.Google)
+	if err != nil {
+		return err
+	}
+	d.syncers = buildSyncers(httpClient, d.cfg)
+	return nil
+}
+
+func buildSyncers(httpClient *http.Client, cfg *config.Config) []sources.Syncer {
+	return []sources.Syncer{
 		calendarpkg.New(httpClient),
 		contactspkg.New(httpClient),
 		taskspkg.New(httpClient),
 		gmailpkg.New(httpClient, cfg.Gmail),
 	}
-
-	pollInterval := cfg.Daemon.PollInterval
-	if pollInterval <= 0 {
-		pollInterval = 15 * time.Minute
-	}
-
-	return &Daemon{
-		db:           database,
-		cfg:          cfg,
-		syncers:      syncers,
-		stopCh:       make(chan struct{}),
-		doneCh:       make(chan struct{}),
-		pollInterval: pollInterval,
-		userID:       defaultUserID,
-	}, nil
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
 	defer close(d.doneCh)
 
 	log.Info().Dur("interval", d.pollInterval).Msg("daemon starting")
+
+	authTicker := time.NewTicker(authRetryInterval)
+	defer authTicker.Stop()
 
 	if err := d.runSyncCycle(ctx); err != nil {
 		log.Error().Err(err).Msg("initial sync cycle failed")
@@ -87,6 +116,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-d.stopCh:
 			log.Info().Msg("stop requested, shutting down")
 			return nil
+		case <-d.triggerCh:
+			if err := d.runSyncCycle(ctx); err != nil {
+				log.Error().Err(err).Msg("manual sync cycle failed")
+			}
+		case <-authTicker.C:
+			d.tryInitSyncers()
 		case <-ticker.C:
 			if err := d.runSyncCycle(ctx); err != nil {
 				log.Error().Err(err).Msg("sync cycle failed")
@@ -104,7 +139,28 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
+func (d *Daemon) tryInitSyncers() {
+	if len(d.syncers) > 0 {
+		return
+	}
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	if len(d.syncers) > 0 {
+		return
+	}
+	if err := d.initSyncers(); err != nil {
+		log.Warn().Err(err).Msg("auth still unavailable, will retry")
+		return
+	}
+	log.Info().Msg("auth restored, syncers initialized")
+}
+
 func (d *Daemon) RunOnce(ctx context.Context) error {
+	if len(d.syncers) == 0 {
+		if err := d.initSyncers(); err != nil {
+			return err
+		}
+	}
 	return d.runSyncCycle(ctx)
 }
 
@@ -114,12 +170,21 @@ func (d *Daemon) Stop() {
 }
 
 func (d *Daemon) runSyncCycle(ctx context.Context) error {
+	if !d.syncing.CompareAndSwap(false, true) {
+		log.Debug().Msg("sync cycle already in progress, skipping")
+		return nil
+	}
+	defer d.syncing.Store(false)
+
+	if len(d.syncers) == 0 {
+		log.Warn().Msg("no syncers available (auth pending)")
+		return nil
+	}
+
 	log.Info().Msg("sync cycle starting")
 
 	for _, syncer := range d.syncers {
-		if err := d.syncSource(ctx, syncer); err != nil {
-			log.Warn().Err(err).Str("source", syncer.Name()).Msg("source sync error")
-		}
+		d.syncSourceSafe(ctx, syncer)
 	}
 
 	if err := d.refreshStatuses(ctx); err != nil {
@@ -131,6 +196,27 @@ func (d *Daemon) runSyncCycle(ctx context.Context) error {
 
 	log.Info().Msg("sync cycle complete")
 	return nil
+}
+
+func (d *Daemon) syncSourceSafe(ctx context.Context, syncer sources.Syncer) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Str("source", syncer.Name()).Msg("syncer panicked, continuing")
+			_ = d.db.SetSyncError(ctx, d.userID, syncer.Name(), "panic during sync")
+		}
+	}()
+
+	if err := d.syncSource(ctx, syncer); err != nil {
+		log.Warn().Err(err).Str("source", syncer.Name()).Msg("source sync failed, retrying in 30s")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(syncRetryDelay):
+		}
+		if retryErr := d.syncSource(ctx, syncer); retryErr != nil {
+			log.Error().Err(retryErr).Str("source", syncer.Name()).Msg("source sync retry failed")
+		}
+	}
 }
 
 func (d *Daemon) syncSource(ctx context.Context, syncer sources.Syncer) error {
@@ -157,6 +243,8 @@ func (d *Daemon) syncSource(ctx context.Context, syncer sources.Syncer) error {
 		return err
 	}
 
+	items = engine.DeduplicateRawItems(items)
+
 	var processed int64
 	for _, item := range items {
 		if item.Type == "cancelled" {
@@ -166,7 +254,12 @@ func (d *Daemon) syncSource(ctx context.Context, syncer sources.Syncer) error {
 			continue
 		}
 
-		alert := engine.Normalize(item, name, d.cfg.Alerts.Windows, d.cfg.Alerts.TTL)
+		if item.DueDate.IsZero() {
+			log.Warn().Str("source", name).Str("source_ref", item.SourceRef).Str("title", item.Title).Msg("skipping item with zero due date")
+			continue
+		}
+
+		alert := engine.Normalize(item, name, d.cfg.Alerts.Windows, d.cfg.Alerts.TTL, d.loc)
 		alert.UserID = d.userID
 
 		dup, err := engine.FindCrossSourceDuplicate(ctx, d.db, &alert)
@@ -175,6 +268,11 @@ func (d *Daemon) syncSource(ctx context.Context, syncer sources.Syncer) error {
 			continue
 		}
 		if dup != nil {
+			merged := engine.MergeCrossSourceAlerts(dup, &alert)
+			merged.UserID = d.userID
+			if err := d.db.ReplaceAlert(ctx, merged); err != nil {
+				log.Warn().Err(err).Str("title", alert.Title).Msg("merge replace failed")
+			}
 			continue
 		}
 
@@ -224,7 +322,7 @@ func (d *Daemon) refreshStatuses(ctx context.Context) error {
 	now := time.Now()
 	for i := range result.Data {
 		oldStatus := result.Data[i].Status
-		newStatus := engine.ComputeStatus(&result.Data[i], now)
+		newStatus := engine.ComputeStatus(&result.Data[i], now, d.loc)
 		if newStatus == oldStatus {
 			continue
 		}
@@ -287,7 +385,7 @@ func (d *Daemon) runDailyRecurring(ctx context.Context) {
 		newAlert := alert
 		newAlert.ID = primitive.NilObjectID
 		newAlert.DueDate = *next
-		newAlert.Status = engine.ComputeStatus(&newAlert, now)
+		newAlert.Status = engine.ComputeStatus(&newAlert, now, d.loc)
 		newAlert.NextOccurrence = engine.NextOccurrence(*next, alert.Recurrence)
 		newAlert.ExpiresAt = engine.ComputeExpiresAt(*next, alert.Type, d.cfg.Alerts.TTL)
 		newAlert.AcknowledgedAt = nil
@@ -312,7 +410,7 @@ func (d *Daemon) runDailyRecurring(ctx context.Context) {
 }
 
 func (d *Daemon) scheduleMidnight() *time.Ticker {
-	now := time.Now()
-	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	now := time.Now().In(d.loc)
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, d.loc)
 	return time.NewTicker(nextMidnight.Sub(now))
 }

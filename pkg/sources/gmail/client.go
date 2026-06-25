@@ -39,7 +39,10 @@ func (s *Syncer) Sync(ctx context.Context, state *models.SyncState) ([]sources.R
 	if state != nil && state.LastPageToken != "" {
 		messages, err = s.fetchByHistoryID(ctx, srv, state.LastPageToken, query)
 		if err != nil {
-			log.Warn().Err(err).Msg("historyId fetch failed, falling back to date query")
+			log.Warn().
+				Err(err).
+				Str("history_id", state.LastPageToken).
+				Msg("gmail history ID expired or invalid, falling back to date query")
 			messages, err = s.fetchByQuery(ctx, srv, query)
 			if err != nil {
 				return nil, "", err

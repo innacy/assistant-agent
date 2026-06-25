@@ -96,6 +96,12 @@ func (m *MongoDB) ListAlerts(ctx context.Context, f AlertFilter) (*AlertListResu
 	}, nil
 }
 
+func (m *MongoDB) ReplaceAlert(ctx context.Context, alert *models.Alert) error {
+	alert.UpdatedAt = time.Now()
+	_, err := m.Alerts().ReplaceOne(ctx, bson.M{"_id": alert.ID}, alert)
+	return err
+}
+
 func (m *MongoDB) UpdateAlertStatus(ctx context.Context, id primitive.ObjectID, status string, extra bson.M) error {
 	update := bson.M{
 		"$set": bson.M{"status": status, "updated_at": time.Now()},
