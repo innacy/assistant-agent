@@ -36,7 +36,23 @@ func NewServer(database *db.MongoDB, cfg *config.Config) *Server {
 	api := router.Group("/api")
 	api.Use(BearerAuth(cfg.Server.APIToken))
 	{
-		// Alert endpoints will be registered here
+		api.GET("/alerts", s.handleListAlerts)
+		api.GET("/alerts/upcoming", s.handleUpcomingAlerts)
+		api.GET("/alerts/missed", s.handleMissedAlerts)
+		api.GET("/alerts/today", s.handleTodayAlerts)
+		api.GET("/alerts/:id", s.handleGetAlert)
+		api.POST("/alerts", s.handleCreateAlert)
+		api.PUT("/alerts/:id", s.handleUpdateAlert)
+		api.DELETE("/alerts/:id", s.handleDeleteAlert)
+		api.POST("/alerts/:id/acknowledge", s.handleAcknowledge)
+		api.POST("/alerts/:id/snooze", s.handleSnooze)
+		api.POST("/alerts/batch/acknowledge", s.handleBatchAcknowledge)
+		api.POST("/alerts/batch/snooze", s.handleBatchSnooze)
+		api.GET("/history", s.handleListHistory)
+		api.GET("/sync/status", s.handleSyncStatus)
+		api.POST("/sync/trigger", s.handleSyncTrigger)
+		api.GET("/settings", s.handleGetSettings)
+		api.PUT("/settings", s.handleUpdateSettings)
 	}
 
 	return s
