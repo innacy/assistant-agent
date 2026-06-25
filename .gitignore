@@ -5,6 +5,7 @@ credentials.json
 token.json
 web/dist/
 web/node_modules/
+pkg/api/web_dist/
 .idea/
 .vscode/
 .DS_Store

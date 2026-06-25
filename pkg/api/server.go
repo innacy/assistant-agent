@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +14,9 @@ import (
 	"github.com/innacy/assistant-agent/pkg/config"
 	"github.com/innacy/assistant-agent/pkg/db"
 )
+
+//go:embed all:web_dist
+var webFS embed.FS
 
 type Server struct {
 	router *gin.Engine
@@ -58,7 +64,41 @@ func NewServer(database *db.MongoDB, cfg *config.Config) *Server {
 		api.PUT("/settings", s.handleUpdateSettings)
 	}
 
+	s.serveSPA(router)
+
 	return s
+}
+
+func (s *Server) serveSPA(router *gin.Engine) {
+	distFS, err := fs.Sub(webFS, "web_dist")
+	if err != nil {
+		return
+	}
+
+	fileServer := http.FileServer(http.FS(distFS))
+
+	router.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+
+		if strings.HasPrefix(path, "/api/") {
+			c.JSON(404, gin.H{"error": "not found"})
+			return
+		}
+
+		filePath := strings.TrimPrefix(path, "/")
+		if filePath == "" {
+			filePath = "index.html"
+		}
+
+		if f, err := distFS.Open(filePath); err == nil {
+			f.Close()
+			fileServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+
+		c.Request.URL.Path = "/"
+		fileServer.ServeHTTP(c.Writer, c.Request)
+	})
 }
 
 func (s *Server) Run() error {
