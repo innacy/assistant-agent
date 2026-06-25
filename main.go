@@ -80,11 +80,31 @@ func main() {
 		}
 		defer database.Close()
 
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		var d *daemonpkg.Daemon
+		d, err = daemonpkg.New(database, cfg)
+		if err != nil {
+			log.Warn().Err(err).Msg("daemon unavailable (run --auth first); starting API only")
+		} else {
+			go func() {
+				if err := d.Run(ctx); err != nil && err != context.Canceled {
+					log.Error().Err(err).Msg("daemon stopped with error")
+				}
+			}()
+		}
+
 		srv := api.NewServer(database, cfg)
 		log.Info().Int("port", cfg.Server.Port).Msg("starting server")
-		if err := srv.Run(); err != nil {
+		if err := srv.RunWithContext(ctx); err != nil {
 			log.Fatal().Err(err).Msg("server failed")
 		}
+
+		if d != nil {
+			d.Stop()
+		}
+		log.Info().Msg("shutdown complete")
 	default:
 		flag.Usage()
 	}

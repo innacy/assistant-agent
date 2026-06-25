@@ -1,7 +1,10 @@
 package api
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -61,6 +64,27 @@ func NewServer(database *db.MongoDB, cfg *config.Config) *Server {
 func (s *Server) Run() error {
 	addr := fmt.Sprintf(":%d", s.cfg.Server.Port)
 	return s.router.Run(addr)
+}
+
+func (s *Server) RunWithContext(ctx context.Context) error {
+	addr := fmt.Sprintf(":%d", s.cfg.Server.Port)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: s.router,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	err := srv.ListenAndServe()
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
